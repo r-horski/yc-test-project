@@ -1,113 +1,57 @@
-import json
-import sqlite3
-import logging
-from datetime import datetime
-import os
+# main.py
+import argparse
+from config import JSON_PATH
+from database import OrderDatabase
+from loader import load_orders
+from logger_config import setup_logger
 
-# Настройка логирования (после создания папки)
+def show_stats():
+    """Показывает статистику по базе"""
+    import sqlite3
+    from config import DB_PATH
 
-DB_PATH = "db/orders.db"
-JSON_PATH = "orders.json"
+    with sqlite3.connect(DB_PATH) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        total_amount = conn.execute("SELECT SUM(amount) FROM orders").fetchone()[0]
+        latest = conn.execute("SELECT MAX(date) FROM orders").fetchone()[0]
 
-
-def setup_logging():
-    """"Настраивает логирование после создания папки logs"""
-    if not os.path.exists("logs"):
-        os.makedirs("logs")
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler("logs/process.log"),
-            logging.StreamHandler()
-        ]
-    )
-
-
-def create_db():
-    """Создаёт таблицу orders, если не существует"""
-    if not os.path.exists("db"):
-        os.makedirs("db")
-    
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            order_id TEXT PRIMARY KEY,
-            status TEXT,
-            date TEXT,
-            amount REAL,
-            customer_region TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    logging.info("Таблица orders создана или уже существует.")
-
-
-def load_json_data():
-    """Читает данные из JSON-файла"""
-    try:
-        with open(JSON_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        logging.info(f"Загружено {len(data)} заказов из {JSON_PATH}")
-        return data
-    except Exception as e:
-        logging.error(f"Ошибка при чтении JSON: {e}")
-        return []
-
-
-def insert_orders(data):
-    """Вставляет заказы, избегая дубликатов"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    inserted = 0
-    for order in data:
-        order_id = order["order_id"]
-        status = order["status"]
-        # Преобразуем ISO-формат в 'YYYY-MM-DD HH:MM:SS'
-        date_str = order["date"].replace('T', ' ')
-        amount = order["amount"]
-        customer_region = order["customer"]["region"]
-
-        # Проверка на дубликат
-        cursor.execute("SELECT 1 FROM orders WHERE order_id = ?", (order_id,))
-        if cursor.fetchone() is None:
-            cursor.execute("""
-                INSERT INTO orders (order_id, status, date, amount, customer_region)
-                VALUES (?, ?, ?, ?, ?)
-            """, (order_id, status, date_str, amount, customer_region))
-            inserted += 1
-        else:
-            logging.info(f"Пропущен дубликат: {order_id}")
-
-    conn.commit()
-    conn.close()
-    logging.info(f"Успешно добавлено {inserted} новых заказов.")
-
+    print(f"\n Статистика:")
+    print(f"   Всего заказов: {count}")
+    print(f"   Общая сумма: {total_amount or 0:.2f} ₽")
+    print(f"   Последний заказ: {latest}")
 
 def main():
-    logging.info("Запуск процесса загрузки данных.")
+    parser = argparse.ArgumentParser(description="Загрузка заказов в SQLite")
+    parser.add_argument("--stats", action="store_true", help="Показать статистику после загрузки")
+    args = parser.parse_args()
 
-    # Создаём директории, если их нет
-    for directory in ["logs", "db"]:
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-            logging.info(f"Создана директория: {directory}")
+    logger = setup_logger()
+    logger.info("🚀 Запуск обработки заказов...")
 
-    setup_logging()  # Теперь логирование настраивается после создания папки
-    
-    create_db()
-    data = load_json_data()
-    if data:
-        insert_orders(data)
-    else:
-        logging.error("Нет данных для вставки.")
+    # Проверка наличия файла
+    if not os.path.exists(JSON_PATH):
+        logger.critical(f"Файл данных не найден: {JSON_PATH}")
+        return
 
-    logging.info("Процесс завершён.")
+    # Инициализация
+    db = OrderDatabase()
+    orders = load_orders()
+
+    if not orders:
+        logger.critical(" Нет данных для обработки. Завершение.")
+        return
+
+    # Загрузка
+    inserted = 0
+    for order in orders:
+        if db.insert_order(order):
+            inserted += 1
+
+    logger.info(f" Загрузка завершена: добавлено {inserted} новых заказов.")
+
+    if args.stats:
+        show_stats()
 
 if __name__ == "__main__":
-    # Инициализируем логирование вручную сначала
-    logging.basicConfig(level=logging.INFO)
+    import os  # нужно для main
     main()
